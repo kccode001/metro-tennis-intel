@@ -4,6 +4,7 @@ import {
   text,
   boolean,
   integer,
+  real,
   numeric,
   date,
   timestamp,
@@ -140,4 +141,120 @@ export const scrapeRuns = pgTable("scrape_runs", {
   retryCount: integer("retry_count").default(0).notNull(),
   postsScraped: integer("posts_scraped"),
   reviewsScraped: integer("reviews_scraped"),
+});
+
+// ─── Google Maps ──────────────────────────────────────────────────────────────
+
+export const mapsBranches = pgTable("maps_branches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  placeId: text("place_id").notNull().unique(),
+  address: text("address"),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const mapsReviews = pgTable("maps_reviews", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  branchId: uuid("branch_id").references(() => mapsBranches.id).notNull(),
+  googleReviewId: text("google_review_id").notNull().unique(),
+  authorName: text("author_name"),
+  rating: integer("rating"), // 1-5
+  body: text("body"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  sentimentScore: real("sentiment_score"),
+  sentimentLabel: text("sentiment_label"), // 'positive' | 'negative' | 'neutral'
+  scrapedAt: timestamp("scraped_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const mapsSnapshots = pgTable(
+  "maps_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    branchId: uuid("branch_id").references(() => mapsBranches.id).notNull(),
+    snapshotDate: text("snapshot_date").notNull(), // YYYY-MM-DD
+    avgRating: real("avg_rating"),
+    totalReviews: integer("total_reviews"),
+    scrapedAt: timestamp("scraped_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.branchId, t.snapshotDate)]
+);
+
+// ─── YouTube ─────────────────────────────────────────────────────────────────
+
+export const ytChannelSnapshots = pgTable(
+  "yt_channel_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    snapshotDate: text("snapshot_date").notNull(), // YYYY-MM-DD
+    subscriberCount: integer("subscriber_count"),
+    videoCount: integer("video_count"),
+    viewCount: integer("view_count"),
+    scrapedAt: timestamp("scraped_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.snapshotDate)]
+);
+
+export const ytVideos = pgTable("yt_videos", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  ytVideoId: text("yt_video_id").notNull().unique(),
+  title: text("title"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  viewCount: integer("view_count"),
+  likeCount: integer("like_count"),
+  commentCount: integer("comment_count"),
+  lastScrapedAt: timestamp("last_scraped_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ─── TikTok ──────────────────────────────────────────────────────────────────
+
+export const tiktokSnapshots = pgTable(
+  "tiktok_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    snapshotDate: text("snapshot_date").notNull(),
+    followerCount: integer("follower_count"),
+    followingCount: integer("following_count"),
+    heartCount: integer("heart_count"),
+    videoCount: integer("video_count"),
+    scrapedAt: timestamp("scraped_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.snapshotDate)]
+);
+
+export const tiktokVideos = pgTable("tiktok_videos", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  tiktokVideoId: text("tiktok_video_id").notNull().unique(),
+  description: text("description"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  playCount: integer("play_count"),
+  likeCount: integer("like_count"),
+  commentCount: integer("comment_count"),
+  shareCount: integer("share_count"),
+  lastScrapedAt: timestamp("last_scraped_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ─── Facebook ────────────────────────────────────────────────────────────────
+
+export const fbSnapshots = pgTable(
+  "fb_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    snapshotDate: text("snapshot_date").notNull(),
+    followerCount: integer("follower_count"),
+    likeCount: integer("like_count"),
+    scrapedAt: timestamp("scraped_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.snapshotDate)]
+);
+
+export const fbPosts = pgTable("fb_posts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  fbPostId: text("fb_post_id").notNull().unique(),
+  body: text("body"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  likeCount: integer("like_count"),
+  commentCount: integer("comment_count"),
+  shareCount: integer("share_count"),
+  lastScrapedAt: timestamp("last_scraped_at", { withTimezone: true }).defaultNow().notNull(),
 });

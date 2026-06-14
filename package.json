@@ -16,9 +16,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@whiskeysockets/baileys": "^6.7.18",
     "apify-client": "^2.11.2",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.41.0",
+    "googleapis": "^173.0.0",
+    "node-fetch": "^3.3.2",
     "pg": "^8.13.3",
     "pg-boss": "^10.1.5",
     "pino": "^9.6.0",
