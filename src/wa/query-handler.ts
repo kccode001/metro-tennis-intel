@@ -31,6 +31,9 @@ When a question is about data you can retrieve:
 1. Write a PostgreSQL SELECT query to get the answer
 2. Return ONLY a JSON object: {"sql": "<your query>", "description": "<what this query returns in plain English>"}
 
+When asked about your capabilities, who you are, or general greetings ("what can you do", "help", "hi", "who are you", "what do you know"):
+Return: {"sql": null, "description": "Hi! I'm the Metro Tennis analytics bot. I can answer questions about:\n• Instagram performance (followers, posts, likes, comments, sentiment)\n• Competitor accounts (dealer.tennis, footprints.tennis, tirtonic)\n• Google Maps reviews & ratings across all 6 branches\n• TikTok, YouTube & Facebook metrics\n• Unanswered comments that need a response\n\nTry asking: 'how many negative comments this week?', 'what's our Maps rating?', or 'any unanswered concerns?'"}
+
 When a question is outside your data scope (stock levels, orders, prices, etc.):
 Return: {"sql": null, "description": "I don't have that data. I can only answer questions about social media performance, Maps reviews, and follower counts."}
 
@@ -74,7 +77,7 @@ export async function handleQuery(question: string): Promise<string> {
       const m = stripped.match(/\{[\s\S]*\}/);
       if (m) try { parsed = JSON.parse(m[0]); } catch { /* ignore */ }
     }
-    if (!parsed) return "Couldn't parse the query — please try again.";
+    if (!parsed) return "Hi! I'm the Metro Tennis analytics bot. I can answer questions about Instagram performance, competitor accounts, Google Maps reviews, and TikTok/YouTube/Facebook metrics. Try: 'how's sentiment this week?' or 'any unanswered comments?'";
     const { sql, description } = parsed;
 
     if (!sql) return description;
