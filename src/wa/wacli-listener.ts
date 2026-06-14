@@ -227,7 +227,11 @@ async function pollOnce(): Promise<void> {
 
   const state = loadPollState();
   const pollTime = state.lastPollTime;
-  const newPollTime = new Date().toISOString();
+  // Advance cursor to now-60s, not now. This creates a 60s overlap window so
+  // a sync-lagged message (stored with an older Timestamp) is still caught on
+  // the next poll even if wacli wrote it after the cursor already advanced.
+  // Dedup by MsgID prevents re-processing already-answered messages.
+  const newPollTime = new Date(Date.now() - 60_000).toISOString();
 
   try {
     for (const chatJid of MONITORED_CHATS) {
