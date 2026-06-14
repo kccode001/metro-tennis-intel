@@ -18,3 +18,13 @@ average_maps_rating
 ---
 4.84
 Delivery ID: 3EB023F54562760D5F408B
+=== 2026-06-14T05:50:25.692Z ===
+Chat: 120363428176735366@g.us
+Sender: KC
+Inbound: how many negative comments did we get this week?
+Bot reply: *This query sums up all negative sentiment counts from sentiment analysis results collected over the past 7 days, giving you the total number of negative comments detected on your Instagram posts this week.*
+
+negative_comments_this_week
+---
+6
+Delivery ID: 3EB09F19910CD1144F864D
