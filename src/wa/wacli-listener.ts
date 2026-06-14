@@ -12,6 +12,8 @@
 import http from "http";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { join } from "path";
 import { handleQuery } from "./query-handler.js";
 import { logger } from "../lib/logger.js";
 
@@ -31,8 +33,31 @@ const DM_ALLOWLIST_RAW: string[] = (
 
 const DM_ALLOWLIST_JIDS = new Set(DM_ALLOWLIST_RAW.map(n => `${n}@s.whatsapp.net`));
 
-// Track processed message IDs to prevent duplicate replies (restart-safe via memory; good enough for poll window)
-const processedMsgIds = new Set<string>();
+// Track processed message IDs to prevent duplicate replies — persisted to disk for restart safety
+
+const DEDUP_FILE = join(process.cwd(), ".wa-dedup.json");
+const MAX_DEDUP_SIZE = 1000; // trim oldest entries to keep file small
+
+function loadProcessedIds(): Set<string> {
+  try {
+    if (existsSync(DEDUP_FILE)) {
+      const arr = JSON.parse(readFileSync(DEDUP_FILE, "utf8")) as string[];
+      return new Set(arr);
+    }
+  } catch { /* start fresh on parse error */ }
+  return new Set<string>();
+}
+
+function saveProcessedId(id: string, set: Set<string>): void {
+  set.add(id);
+  try {
+    let arr = Array.from(set);
+    if (arr.length > MAX_DEDUP_SIZE) arr = arr.slice(arr.length - MAX_DEDUP_SIZE);
+    writeFileSync(DEDUP_FILE, JSON.stringify(arr), "utf8");
+  } catch { /* non-fatal */ }
+}
+
+const processedMsgIds = loadProcessedIds();
 
 // --- Message shape from wacli webhook ---
 interface WacliWebhookMessage {
@@ -83,14 +108,7 @@ async function sendReply(
   quoteMsgId?: string,
   quoteSenderJid?: string,
 ): Promise<string> {
-  // Write message to a temp file to avoid shell argument length/escaping issues
-  const { writeFile, unlink } = await import("fs/promises");
-  const { tmpdir } = await import("os");
-  const { join } = await import("path");
-  const tmpFile = join(tmpdir(), `metro-wa-reply-${Date.now()}.txt`);
-  await writeFile(tmpFile, text, "utf8");
-
-  // Build args using --message flag (execFile handles escaping safely)
+  // execFile handles escaping safely — no shell interpolation
   const args = [
     "send", "text",
     "--account", WACLI_ACCOUNT,
@@ -106,16 +124,11 @@ async function sendReply(
     }
   }
 
-  logger.info({ chatJid, textLen: text.length, args: args.slice(0, 8).join(" ") }, "Sending reply via wacli");
-  try {
-    const { stdout } = await execFileAsync("wacli", args, { timeout: 30_000 });
-    logger.info({ stdout }, "wacli send result");
-    // Extract delivery ID from output (e.g. "3EB0DC560F6E93841618E7")
-    const idMatch = stdout.match(/([A-F0-9]{20,})/i);
-    return idMatch?.[1] ?? stdout.trim();
-  } finally {
-    await unlink(tmpFile).catch(() => { /* ignore */ });
-  }
+  logger.info({ chatJid, textLen: text.length }, "Sending reply via wacli");
+  const { stdout } = await execFileAsync("wacli", args, { timeout: 30_000 });
+  logger.info({ stdout }, "wacli send result");
+  const idMatch = stdout.match(/([A-F0-9]{20,})/i);
+  return idMatch?.[1] ?? stdout.trim();
 }
 
 // --- Process inbound message ---
@@ -129,7 +142,7 @@ async function processMessage(msg: WacliWebhookMessage): Promise<void> {
     logger.debug({ msgId: msg.MsgID }, "Already processed — skipping duplicate");
     return;
   }
-  processedMsgIds.add(msg.MsgID);
+  saveProcessedId(msg.MsgID, processedMsgIds);
 
   const question = msg.Text.trim();
   logger.info({ chatJid: msg.ChatJID, sender: msg.SenderName, question }, "Inbound question");
@@ -165,7 +178,6 @@ interface ProofEntry {
 
 async function appendProof(entry: ProofEntry): Promise<void> {
   const { appendFile, mkdir } = await import("fs/promises");
-  const { join } = await import("path");
   const date = entry.timestamp.split("T")[0]!;
   const dir = join(process.cwd(), "proof");
   await mkdir(dir, { recursive: true });
@@ -238,6 +250,7 @@ function startWacliSync(webhookUrl: string): void {
     "--account", WACLI_ACCOUNT,
     "--follow",
     "--webhook", webhookUrl,
+    "--webhook-allow-private",
   ];
 
   logger.info({ args: args.join(" ") }, "Starting wacli sync subprocess");

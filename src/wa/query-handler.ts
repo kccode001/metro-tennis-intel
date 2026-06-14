@@ -39,7 +39,9 @@ Rules:
 - Always LIMIT results (max 20 rows unless asked for more).
 - Prefer human-readable column aliases.
 - For "this week" use: WHERE x >= NOW() - INTERVAL '7 days'
-- For "today" use: WHERE date_trunc('day', x) = CURRENT_DATE`;
+- For "today" use: WHERE date_trunc('day', x) = CURRENT_DATE
+- For sentiment questions ("negative comments", "positive sentiment", "how is sentiment"), ALWAYS query sentiment_results (not ig_comments). Example: SELECT SUM(negative_count) AS negative FROM sentiment_results WHERE run_at >= NOW() - INTERVAL '7 days'
+- For unanswered/unresponded concerns, query ig_comments where we have no reply (there is no replied column; treat all ig_comments rows as potentially unanswered and surface the most recent ones)`;
 
 export async function handleQuery(question: string): Promise<string> {
   if (!client) return "Sorry, AI query not available (no API key).";
