@@ -1,0 +1,20 @@
+=== 2026-06-14T05:11:29.348Z ===
+Chat: 120363428176735366@g.us
+Sender: Kevin Charles
+Inbound: how many negative comments did we get this week?
+Bot reply: *This query counts comments posted in the last 7 days that contain negative keywords. However, this is a basic keyword-based approach. For more accurate sentiment analysis, I should check if the sentiment_results table has been run on these comments—would you like me to query the sentiment analysis data instead if available?*
+
+negative_comment_count
+---
+0
+Delivery ID: 3EB0B426B6D404BD65C8F3
+=== 2026-06-14T05:11:45.959Z ===
+Chat: 6285161367231@s.whatsapp.net
+Sender: Kevin Charles
+Inbound: what is our average maps rating?
+Bot reply: *Returns the overall average Google Maps rating across all Metro Tennis branches based on the latest snapshot data.*
+
+average_maps_rating
+---
+4.84
+Delivery ID: 3EB023F54562760D5F408B
