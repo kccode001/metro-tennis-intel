@@ -53,10 +53,27 @@ export async function handleQuery(question: string): Promise<string> {
     });
 
     const text = response.content[0]?.type === "text" ? response.content[0].text : "";
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return "Couldn't parse the query — please try again.";
 
-    const { sql, description } = JSON.parse(jsonMatch[0]) as { sql: string | null; description: string };
+    // Extract the first valid JSON object (non-greedy to avoid swallowing trailing text)
+    let parsed: { sql: string | null; description: string } | null = null;
+    const jsonCandidates = text.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}/g) ?? [];
+    // Also try full greedy match as fallback for nested objects
+    const greedyMatch = text.match(/\{[\s\S]*?\}/);
+    const candidates = [...jsonCandidates, greedyMatch?.[0] ?? ""].filter(Boolean);
+    for (const candidate of candidates) {
+      try {
+        const p = JSON.parse(candidate) as { sql?: string | null; description?: string };
+        if ("description" in p) { parsed = { sql: p.sql ?? null, description: p.description ?? "" }; break; }
+      } catch { /* try next */ }
+    }
+    // Last resort: try stripping markdown code fences
+    if (!parsed) {
+      const stripped = text.replace(/```(?:json)?/g, "").trim();
+      const m = stripped.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch { /* ignore */ }
+    }
+    if (!parsed) return "Couldn't parse the query — please try again.";
+    const { sql, description } = parsed;
 
     if (!sql) return description;
 
