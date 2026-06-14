@@ -90,7 +90,7 @@ export async function scrapeIgAccounts(
       const actorRun = await client.actor("apify/instagram-scraper").call({
         directUrls: [`https://www.instagram.com/${account.handle}/`],
         resultsType: "posts",
-        resultsLimit: 20,
+        resultsLimit: 100,
         addParentData: false,
         scrapeComments: accountType === "own",
         commentsSortOrder: "recent",

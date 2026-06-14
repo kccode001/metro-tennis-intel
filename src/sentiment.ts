@@ -69,13 +69,16 @@ export async function runSentimentPipeline(): Promise<void> {
     return;
   }
 
-  // Find posts with unprocessed comments
-  const { rows: posts } = await pool.query<{ post_id: string }>(`
-    SELECT DISTINCT c.post_id
-    FROM ig_comments c
-    WHERE NOT EXISTS (
-      SELECT 1 FROM sentiment_results sr WHERE sr.post_id = c.post_id
-    )
+  // Find own-account posts not yet processed: prefer those with comments, fall back to caption
+  const { rows: posts } = await pool.query<{
+    post_id: string; caption: string | null; has_comments: boolean;
+  }>(`
+    SELECT p.id as post_id, p.caption,
+      EXISTS(SELECT 1 FROM ig_comments c WHERE c.post_id = p.id) as has_comments
+    FROM ig_posts p
+    JOIN ig_accounts a ON a.id = p.account_id AND a.account_type = 'own'
+    WHERE NOT EXISTS (SELECT 1 FROM sentiment_results sr WHERE sr.post_id = p.id)
+    ORDER BY p.posted_at DESC NULLS LAST
     LIMIT 50
   `);
 
@@ -86,15 +89,30 @@ export async function runSentimentPipeline(): Promise<void> {
 
   logger.info({ postCount: posts.length }, "Running sentiment on posts");
 
-  for (const { post_id } of posts) {
-    const { rows: comments } = await pool.query<CommentRow>(
-      `SELECT id, post_id, body, author_handle FROM ig_comments WHERE post_id = $1 LIMIT 200`,
-      [post_id]
-    );
-
-    if (comments.length === 0) continue;
-
+  for (const { post_id, caption, has_comments } of posts) {
     try {
+      let comments: CommentRow[] = [];
+
+      if (has_comments) {
+        const { rows } = await pool.query<CommentRow>(
+          `SELECT id, post_id, body, author_handle FROM ig_comments WHERE post_id = $1 LIMIT 200`,
+          [post_id]
+        );
+        comments = rows;
+      }
+
+      // Fall back to caption if no comments
+      if (comments.length === 0 && caption) {
+        comments = [{
+          id: `caption_${post_id}`,
+          post_id,
+          body: caption,
+          author_handle: "caption",
+        }];
+      }
+
+      if (comments.length === 0) continue;
+
       const results = await classifyBatch(comments);
 
       let pos = 0, neu = 0, neg = 0, totalScore = 0;
@@ -103,9 +121,6 @@ export async function runSentimentPipeline(): Promise<void> {
         else if (r.sentiment === "negative") neg++;
         else neu++;
         totalScore += r.score;
-
-        // Write per-comment sentiment (stored in sentiment_results raw_response for now)
-        // Full per-comment table would need ig_comment_sentiments — using raw_response as audit trail
       }
 
       const avg = results.length > 0 ? totalScore / results.length : 0;
@@ -117,7 +132,7 @@ export async function runSentimentPipeline(): Promise<void> {
         [post_id, MODEL, comments.length, pos, neu, neg, avg.toFixed(3), JSON.stringify(results)]
       );
 
-      logger.info({ post_id, pos, neu, neg, avg: avg.toFixed(2) }, "Sentiment saved");
+      logger.info({ post_id, pos, neu, neg, avg: avg.toFixed(2), source: has_comments ? "comments" : "caption" }, "Sentiment saved");
     } catch (err) {
       logger.error({ err, post_id }, "Sentiment batch failed");
     }
