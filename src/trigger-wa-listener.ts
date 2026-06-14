@@ -27,12 +27,11 @@ import { pool } from "./db/client.js";
 import { startListener } from "./wa/wacli-listener.js";
 import { logger } from "./lib/logger.js";
 
-logger.info("Metro Tennis WA Interactive Agent starting...");
+logger.info("Metro Tennis WA Interactive Agent starting (polling mode)...");
 logger.info({
   group: process.env["WA_GROUP_JID"] ?? "120363428176735366@g.us",
   dmAllowlist: process.env["WA_DM_ALLOWLIST"] ?? "6285161367231,6281365161000",
   account: process.env["WACLI_ACCOUNT"] ?? "cs-inbound",
-  port: process.env["WACLI_WEBHOOK_PORT"] ?? "9876",
 }, "Listener config");
 
 // Graceful shutdown

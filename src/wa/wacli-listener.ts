@@ -1,15 +1,16 @@
 /**
  * wacli-listener.ts — Inbound WhatsApp handler for Metro Tennis.
  *
- * Architecture:
- *  - Runs `wacli sync --webhook http://localhost:<PORT> --follow` as a child process.
- *  - wacli POSTs each live message as JSON to our local HTTP server.
- *  - We filter: only Metro Analytics group OR DMs from owner allowlist.
+ * Architecture (v2 — polling):
+ *  - Runs `wacli sync --follow` as a child process to keep the local store fresh.
+ *  - Every POLL_INTERVAL_MS, reads new messages from the wacli store via
+ *    `wacli messages list --after <lastPollTime>` for the Metro group and DM allowlist.
+ *  - Webhook delivery (`wacli sync --webhook`) proved unreliable for live-tail events;
+ *    polling the local DB is the correct pattern for wacli 0.9.2.
  *  - Route to handleQuery (Haiku NL→SQL→DB→format).
  *  - Reply via `wacli send text`.
  */
 
-import http from "http";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { readFileSync, writeFileSync, existsSync } from "fs";
@@ -20,7 +21,7 @@ import { logger } from "../lib/logger.js";
 const execFileAsync = promisify(execFile);
 
 // --- Config ---
-export const WEBHOOK_PORT = parseInt(process.env["WACLI_WEBHOOK_PORT"] ?? "9876", 10);
+const POLL_INTERVAL_MS = 15_000; // poll every 15 seconds
 const WACLI_ACCOUNT = process.env["WACLI_ACCOUNT"] ?? "cs-inbound";
 
 // The Metro Tennis Analytics group JID
@@ -31,12 +32,15 @@ const DM_ALLOWLIST_RAW: string[] = (
   process.env["WA_DM_ALLOWLIST"] ?? "6285161367231,6281365161000"
 ).split(",").map(n => n.trim()).filter(Boolean);
 
-const DM_ALLOWLIST_JIDS = new Set(DM_ALLOWLIST_RAW.map(n => `${n}@s.whatsapp.net`));
+const DM_ALLOWLIST_JIDS = DM_ALLOWLIST_RAW.map(n => `${n}@s.whatsapp.net`);
 
-// Track processed message IDs to prevent duplicate replies — persisted to disk for restart safety
+// Chats to monitor
+const MONITORED_CHATS = [METRO_GROUP_JID, ...DM_ALLOWLIST_JIDS];
 
+// --- Persistent state files ---
 const DEDUP_FILE = join(process.cwd(), ".wa-dedup.json");
-const MAX_DEDUP_SIZE = 1000; // trim oldest entries to keep file small
+const POLL_STATE_FILE = join(process.cwd(), ".wa-poll-state.json");
+const MAX_DEDUP_SIZE = 1000;
 
 function loadProcessedIds(): Set<string> {
   try {
@@ -57,10 +61,27 @@ function saveProcessedId(id: string, set: Set<string>): void {
   } catch { /* non-fatal */ }
 }
 
+function loadPollState(): { lastPollTime: string } {
+  try {
+    if (existsSync(POLL_STATE_FILE)) {
+      return JSON.parse(readFileSync(POLL_STATE_FILE, "utf8")) as { lastPollTime: string };
+    }
+  } catch { /* start fresh */ }
+  // Default: look back 5 minutes on first run to catch any missed messages
+  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  return { lastPollTime: fiveMinAgo };
+}
+
+function savePollState(state: { lastPollTime: string }): void {
+  try {
+    writeFileSync(POLL_STATE_FILE, JSON.stringify(state), "utf8");
+  } catch { /* non-fatal */ }
+}
+
 const processedMsgIds = loadProcessedIds();
 
-// --- Message shape from wacli webhook ---
-interface WacliWebhookMessage {
+// --- wacli message shape ---
+interface WacliMessage {
   ChatJID: string;
   ChatName: string;
   MsgID: string;
@@ -72,33 +93,34 @@ interface WacliWebhookMessage {
   MediaType?: string;
 }
 
-interface WacliWebhookPayload {
-  event?: string;
-  message?: WacliWebhookMessage;
-  // Some wacli versions wrap differently
-  [key: string]: unknown;
+interface WacliListResponse {
+  success: boolean;
+  data: { messages: WacliMessage[] };
+  error: string | null;
 }
 
-// --- Filter logic ---
-function shouldRespond(msg: WacliWebhookMessage): boolean {
-  // Never respond to our own outbound messages
-  if (msg.FromMe) return false;
+// --- Fetch new messages from wacli store ---
+async function fetchNewMessages(chatJid: string, after: string): Promise<WacliMessage[]> {
+  const args = [
+    "messages", "list",
+    "--account", WACLI_ACCOUNT,
+    "--chat", chatJid,
+    "--from-them",
+    "--after", after,
+    "--asc",          // oldest first — process in chronological order
+    "--json",
+    "--limit", "50",
+    "--read-only",    // avoid write lock conflicts with sync subprocess
+  ];
 
-  // Only text messages
-  if (!msg.Text || msg.Text.trim() === "") return false;
-
-  // Check: is this the Metro group?
-  if (msg.ChatJID === METRO_GROUP_JID) return true;
-
-  // Check: is this a DM from an allowlisted number?
-  if (msg.ChatJID.endsWith("@s.whatsapp.net")) {
-    // For DMs, ChatJID == the other person's JID
-    if (DM_ALLOWLIST_JIDS.has(msg.ChatJID)) return true;
-    // Also check SenderJID (for group DMs / some accounts, sender is different)
-    if (msg.SenderJID && DM_ALLOWLIST_JIDS.has(msg.SenderJID)) return true;
+  try {
+    const { stdout } = await execFileAsync("wacli", args, { timeout: 15_000 });
+    const result = JSON.parse(stdout) as WacliListResponse;
+    return result.data?.messages ?? [];
+  } catch (err) {
+    logger.warn({ err, chatJid }, "wacli messages list failed (non-fatal)");
+    return [];
   }
-
-  return false;
 }
 
 // --- Reply via wacli ---
@@ -108,7 +130,6 @@ async function sendReply(
   quoteMsgId?: string,
   quoteSenderJid?: string,
 ): Promise<string> {
-  // execFile handles escaping safely — no shell interpolation
   const args = [
     "send", "text",
     "--account", WACLI_ACCOUNT,
@@ -124,25 +145,26 @@ async function sendReply(
     }
   }
 
+  // --lock-wait: wacli sync holds the store lock; wait up to 30s for it to release
+  args.push("--lock-wait", "30s");
+
   logger.info({ chatJid, textLen: text.length }, "Sending reply via wacli");
-  const { stdout } = await execFileAsync("wacli", args, { timeout: 30_000 });
+  const { stdout } = await execFileAsync("wacli", args, { timeout: 60_000 });
   logger.info({ stdout }, "wacli send result");
   const idMatch = stdout.match(/([A-F0-9]{20,})/i);
   return idMatch?.[1] ?? stdout.trim();
 }
 
-// --- Process inbound message ---
-async function processMessage(msg: WacliWebhookMessage): Promise<void> {
-  if (!shouldRespond(msg)) {
-    logger.debug({ chatJid: msg.ChatJID, fromMe: msg.FromMe }, "Skipping message (out of scope)");
-    return;
-  }
+// --- Process a single inbound message ---
+async function processMessage(msg: WacliMessage): Promise<void> {
+  // Skip non-text
+  if (!msg.Text || msg.Text.trim() === "") return;
 
+  // Dedup
   if (processedMsgIds.has(msg.MsgID)) {
     logger.debug({ msgId: msg.MsgID }, "Already processed — skipping duplicate");
     return;
   }
-  saveProcessedId(msg.MsgID, processedMsgIds);
 
   const question = msg.Text.trim();
   logger.info({ chatJid: msg.ChatJID, sender: msg.SenderName, question }, "Inbound question");
@@ -150,9 +172,10 @@ async function processMessage(msg: WacliWebhookMessage): Promise<void> {
   try {
     const answer = await handleQuery(question);
     const deliveryId = await sendReply(msg.ChatJID, answer, msg.MsgID, msg.SenderJID);
+    // Mark processed only after successful reply
+    saveProcessedId(msg.MsgID, processedMsgIds);
     logger.info({ chatJid: msg.ChatJID, deliveryId }, "Reply sent");
 
-    // Append to proof log
     await appendProof({
       timestamp: new Date().toISOString(),
       chatJid: msg.ChatJID,
@@ -195,62 +218,52 @@ async function appendProof(entry: ProofEntry): Promise<void> {
   logger.info({ file }, "Proof appended");
 }
 
-// --- Webhook HTTP server ---
-function createWebhookServer(): http.Server {
-  const server = http.createServer((req, res) => {
-    if (req.method !== "POST") {
-      res.writeHead(405);
-      res.end("Method Not Allowed");
-      return;
+// --- Polling loop ---
+let pollRunning = false;
+
+async function pollOnce(): Promise<void> {
+  if (pollRunning) return; // don't overlap polls
+  pollRunning = true;
+
+  const state = loadPollState();
+  const pollTime = state.lastPollTime;
+  const newPollTime = new Date().toISOString();
+
+  try {
+    for (const chatJid of MONITORED_CHATS) {
+      const messages = await fetchNewMessages(chatJid, pollTime);
+      if (messages.length > 0) {
+        logger.info({ chatJid, count: messages.length }, "Poll: found new messages");
+      }
+      for (const msg of messages) {
+        await processMessage(msg);
+      }
     }
-
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => {
-      res.writeHead(200);
-      res.end("OK");
-
-      const body = Buffer.concat(chunks).toString("utf8");
-      let payload: WacliWebhookPayload;
-      try {
-        payload = JSON.parse(body) as WacliWebhookPayload;
-      } catch {
-        logger.warn({ body: body.slice(0, 200) }, "Could not parse webhook body");
-        return;
-      }
-
-      // wacli can send the message directly or wrap it in {event, message}
-      let msg: WacliWebhookMessage | undefined;
-      if (payload.message && typeof payload.message === "object") {
-        msg = payload.message as WacliWebhookMessage;
-      } else if (typeof payload.ChatJID === "string") {
-        msg = payload as unknown as WacliWebhookMessage;
-      }
-
-      if (!msg) {
-        // Could be a status/connection event — log at debug and ignore
-        logger.debug({ event: payload.event }, "Non-message webhook event");
-        return;
-      }
-
-      // Fire-and-forget (webhook must return fast)
-      processMessage(msg).catch(err =>
-        logger.error({ err }, "processMessage threw unexpectedly")
-      );
-    });
-  });
-
-  return server;
+    // Only advance the poll cursor after a successful round
+    savePollState({ lastPollTime: newPollTime });
+  } catch (err) {
+    logger.error({ err }, "Poll cycle error");
+  } finally {
+    pollRunning = false;
+  }
 }
 
-// --- wacli sync subprocess ---
-function startWacliSync(webhookUrl: string): void {
+function startPollingLoop(): void {
+  logger.info({ intervalMs: POLL_INTERVAL_MS, monitored: MONITORED_CHATS }, "Starting poll loop");
+  // Run immediately on start (catches any messages since last run)
+  pollOnce().catch(err => logger.error({ err }, "Initial poll error"));
+  // Then on interval
+  setInterval(() => {
+    pollOnce().catch(err => logger.error({ err }, "Poll interval error"));
+  }, POLL_INTERVAL_MS);
+}
+
+// --- wacli sync subprocess (keeps the store fresh) ---
+function startWacliSync(): void {
   const args = [
     "sync",
     "--account", WACLI_ACCOUNT,
     "--follow",
-    "--webhook", webhookUrl,
-    "--webhook-allow-private",
   ];
 
   logger.info({ args: args.join(" ") }, "Starting wacli sync subprocess");
@@ -265,35 +278,33 @@ function startWacliSync(webhookUrl: string): void {
   });
 
   proc.stderr?.on("data", (data: Buffer) => {
-    // wacli logs lifecycle events to stderr — useful for debugging
     const text = data.toString().trim();
     if (text) logger.info({ wacliStderr: text }, "wacli sync event");
   });
 
   proc.on("exit", (code, signal) => {
     logger.warn({ code, signal }, "wacli sync exited — restarting in 5s");
-    setTimeout(() => startWacliSync(webhookUrl), 5_000);
+    setTimeout(() => startWacliSync(), 5_000);
   });
 
   proc.on("error", (err) => {
     logger.error({ err }, "wacli sync spawn error — restarting in 5s");
-    setTimeout(() => startWacliSync(webhookUrl), 5_000);
+    setTimeout(() => startWacliSync(), 5_000);
   });
 }
 
 // --- Main export: start listener ---
 export function startListener(): void {
-  const server = createWebhookServer();
-  const webhookUrl = `http://localhost:${WEBHOOK_PORT}`;
+  logger.info({
+    account: WACLI_ACCOUNT,
+    group: METRO_GROUP_JID,
+    dmAllowlist: DM_ALLOWLIST_JIDS,
+    pollIntervalS: POLL_INTERVAL_MS / 1000,
+  }, "Metro Tennis WA listener starting (polling mode)");
 
-  server.listen(WEBHOOK_PORT, "127.0.0.1", () => {
-    logger.info({ webhookUrl }, "Metro Tennis WA listener webhook server started");
-    // Start wacli sync pointed at our webhook
-    startWacliSync(webhookUrl);
-  });
+  // Start wacli sync to keep the store fresh
+  startWacliSync();
 
-  server.on("error", (err) => {
-    logger.error({ err }, "Webhook server error");
-    process.exit(1);
-  });
+  // Start the polling loop
+  startPollingLoop();
 }

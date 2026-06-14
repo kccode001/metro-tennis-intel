@@ -28,3 +28,13 @@ negative_comments_this_week
 ---
 6
 Delivery ID: 3EB09F19910CD1144F864D
+=== 2026-06-14T09:42:41.728Z ===
+Chat: 120363428176735366@g.us
+Sender: Kevin Charles
+Inbound: how many reviews do we have?
+Bot reply: *This query returns the total number of Google Maps reviews across all 6 Metro Tennis branches.*
+
+total_reviews
+---
+25
+Delivery ID: 3EB0796FB629128562087D
